@@ -13,7 +13,7 @@ class ManusFallbackManager:
     def get_models(self):
         return self.available_models if self.is_available() else []
 
-    def generate_response(self, prompt, system_prompt, model_name="manus-1"):
+    def generate_response(self, prompt, system_prompt, history=None, model_name="manus-1"):
         if not self.api_key:
             return "Error: MANUS_API_KEY no está configurada en el entorno."
 
@@ -22,12 +22,22 @@ class ManusFallbackManager:
             "Content-Type": "application/json"
         }
         
+        # Inyectamos el System Prompt
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Traducimos el historial de Gemini al formato estándar (user/assistant)
+        if history:
+            for msg in history:
+                role = "user" if msg["role"] == "user" else "assistant"
+                content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
+                messages.append({"role": role, "content": content})
+                
+        # Añadimos el nuevo prompt
+        messages.append({"role": "user", "content": prompt})
+        
         payload = {
             "model": model_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ]
+            "messages": messages
         }
         
         try:

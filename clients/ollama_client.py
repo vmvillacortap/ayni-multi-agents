@@ -25,11 +25,22 @@ class OllamaFallbackManager:
         except requests.exceptions.RequestException:
             return False
 
-    def generate_response(self, prompt, system_prompt):
+    def generate_response(self, prompt, system_prompt, history=None):
         if not self.model_name: return "Error: No hay modelo local configurado."
+        
+        # Construimos el texto del historial para Ollama (endpoint /generate)
+        history_text = ""
+        if history:
+            for msg in history:
+                role_name = "Usuario" if msg["role"] == "user" else "Asistente"
+                content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
+                history_text += f"{role_name}: {content}\n"
+                
+        full_prompt = f"{system_prompt}\n\n{history_text}Usuario: {prompt}\nAsistente:"
+        
         payload = {
             "model": self.model_name,
-            "prompt": f"{system_prompt}\n\nUsuario: {prompt}\nAsistente:",
+            "prompt": full_prompt,
             "stream": False
         }
         try:

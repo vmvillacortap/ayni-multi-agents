@@ -72,7 +72,6 @@ class GeminiSessionManager:
                 system_instruction=self.system_prompt,
                 tools=self.tools
             )
-            # Reinyectamos el historial desde PostgreSQL a la sesión local
             self.chat_session = self.model.start_chat(
                 history=self.history,
                 enable_automatic_function_calling=True
@@ -99,14 +98,12 @@ class GeminiSessionManager:
             return {"complexity": "low", "is_complaint": False}
 
     def _sync_history_to_db(self, interaction_id, new_user_msg, new_model_msg):
-        """Guarda exclusivamente el último turno (usuario y modelo) en la BD, evitando reescribir todo el historial."""
         if not self.db:
             return
             
         self.db.append_to_history(self.session_id, interaction_id, "user", [new_user_msg])
         self.db.append_to_history(self.session_id, interaction_id, "model", [new_model_msg])
         
-        # Sincronizamos la memoria local de la clase para que próximos _switch_active_model estén al día
         self.history = self.db.load_history(self.session_id)
 
     def send_message_sync(self, message):
@@ -167,11 +164,13 @@ class GeminiSessionManager:
                 
                 in_tokens = int(len(message.split()) * 1.3)
                 if provider == "Ollama":
-                    resp = self.ollama_fallback.generate_response(message, self.system_prompt)
+                    # Pasamos self.history al modelo de fallback
+                    resp = self.ollama_fallback.generate_response(message, self.system_prompt, self.history)
                     out_tokens = int(len(resp.split()) * 1.3)
                     return resp, selected_model, "Ollama", in_tokens, out_tokens, error_info
                 elif provider == "Manus":
-                    resp = self.manus_fallback.generate_response(message, self.system_prompt, selected_model)
+                    # Pasamos self.history al modelo de fallback
+                    resp = self.manus_fallback.generate_response(message, self.system_prompt, self.history, selected_model)
                     out_tokens = int(len(resp.split()) * 1.3)
                     return resp, selected_model, "Manus", in_tokens, out_tokens, error_info
                 else:
