@@ -1,0 +1,7 @@
+# Ignorar credenciales y secretos locales
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+# Conservar estructura de main/, AGENTS.md y subagentes .md
