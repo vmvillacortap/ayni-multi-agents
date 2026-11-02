@@ -39,7 +39,20 @@ class GeminiSessionManager:
         self.ollama_fallback = OllamaFallbackManager() 
         self.manus_fallback = ManusFallbackManager()
         
+        # Guardamos la lista de preferencias dinámicas para poder rotarlas en caso de 429
+        self.dynamic_preferences = [
+            'models/gemini-3.8-flash',
+            'models/gemini-3.7-flash', 
+            'models/gemini-3.5-flash', 
+            'models/gemini-2.5-flash', 
+            'models/gemini-1.5-flash-latest'
+        ]
+        
         self.current_model_name = self._get_best_available_model()
+        self._init_model()
+
+    def _init_model(self):
+        """Inicializa o reinicializa el modelo activo y la sesión de chat."""
         self.model = genai.GenerativeModel(
             model_name=self.current_model_name, 
             system_instruction=self.system_prompt,
@@ -54,8 +67,7 @@ class GeminiSessionManager:
     def _get_best_available_model(self):
         try:
             available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            preferences = ['models/gemini-3.8-flash', 'models/gemini-3.7-flash', 'models/gemini-3.5-flash', 'models/gemini-2.5-flash', 'models/gemini-1.5-flash-latest']
-            for pref in preferences:
+            for pref in self.dynamic_preferences:
                 if pref in available_models: return pref
             if available_models: return available_models[0]
             raise ValueError("No hay modelos generateContent disponibles.")
@@ -89,15 +101,44 @@ class GeminiSessionManager:
                 out_tokens = response.usage_metadata.candidates_token_count
                 
             return response.text, self.current_model_name, "Gemini", in_tokens, out_tokens, error_info
+            
         except Exception as e:
-            error_info = {"type": type(e).__name__, "message": str(e), "fallback": True}
+            error_msg = str(e)
+            
+            # --- ESTRATEGIA DE MITIGACIÓN PARA ERROR 429 (CUOTA EXCEDIDA) ---
+            if "429" in error_msg and "quota" in error_msg.lower():
+                print(f"\n\033[93m[Cuota Agotada] El modelo {self.current_model_name} superó el límite gratuito.\033[0m")
+                
+                # Remover el modelo agotado de la lista dinámica
+                if self.current_model_name in self.dynamic_preferences:
+                    self.dynamic_preferences.remove(self.current_model_name)
+                
+                if self.dynamic_preferences:
+                    nuevo_modelo = self._get_best_available_model()
+                    if nuevo_modelo != self.current_model_name:
+                        print(f"\033[92m[Rotación Dinámica] Cambiando familia al modelo: {nuevo_modelo}... Reintentando.\033[0m")
+                        self.current_model_name = nuevo_modelo
+                        self._init_model() # Reinicia la sesión con el nuevo modelo
+                        
+                        # Reintento recursivo (solo 1 nivel profundo por mensaje para evitar bucles)
+                        try:
+                            # Imprimimos de nuevo el indicador para que no se borre el flujo en consola
+                            print("\033[93m[⚙️ Procesando intención y enrutando...]\033[0m", end="\r", flush=True)
+                            return self.send_message_sync(message)
+                        except Exception as retry_e:
+                            print(f"\n\033[91m[Error en Reintento] El nuevo modelo también falló: {retry_e}\033[0m")
+                            # Si falla el reintento, cae al bloque de fallback estándar abajo
+                else:
+                    print("\033[91m[Crítico] Se agotaron todas las familias de modelos de Gemini preferidas.\033[0m")
+            
+            # --- ESTRATEGIA ESTÁNDAR DE CONTINGENCIA (POP-UP) ---
+            error_info = {"type": type(e).__name__, "message": error_msg, "fallback": True}
             print(f"\n\033[93m[Alerta] Falla en API de Gemini ({e}). Evaluando alternativas...\033[0m")
             
             if self.ollama_fallback.is_available() or self.manus_fallback.is_available():
                 print(f"\033[93m[UI] Abriendo Centro de Contingencia Multi-Agente (Pop-up)...\033[0m")
                 provider, selected_model = show_model_selector(self.ollama_fallback.api_url, self.manus_fallback.get_models())
                 
-                # Estimación aproximada de tokens para motores que no devuelven métricas en crudo
                 in_tokens = int(len(message.split()) * 1.3)
                 
                 if provider == "Ollama":
