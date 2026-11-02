@@ -5,12 +5,10 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from tavily import TavilyClient
 
-# Importación del módulo local desde la carpeta clients
 from clients.ollama_client import OllamaFallbackManager
+# Importamos la nueva UI para selección de modelos
+from clients.ollama_ui import show_model_selector
 
-# ==========================================
-# DEFINICIÓN DE HERRAMIENTAS (TOOLS)
-# ==========================================
 def obtener_hora_local():
     """Útil para saber la hora, fecha o día actual del sistema."""
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -29,9 +27,6 @@ def buscar_en_internet(consulta: str):
     except Exception as e:
         return f"Error en la búsqueda web: {str(e)}"
 
-# ==========================================
-# CLIENTE PRINCIPAL GEMINI
-# ==========================================
 class GeminiSessionManager:
     def __init__(self, history_file="chat_history.json", system_prompt="Eres un asistente experto."):
         load_dotenv()
@@ -44,7 +39,6 @@ class GeminiSessionManager:
         self.system_prompt = system_prompt
         self.tools = [obtener_hora_local, buscar_en_internet]
         
-        # Gestor de Fallback Instanciado
         self.ollama_fallback = OllamaFallbackManager() 
         
         self.current_model_name = self._get_best_available_model()
@@ -64,24 +58,17 @@ class GeminiSessionManager:
         try:
             available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             preferences = [
-                'models/gemini-3.8-flash',
-                'models/gemini-3.7-flash',
-                'models/gemini-3.5-flash',
-                'models/gemini-2.5-flash',
-                'models/gemini-1.5-flash-latest',
-                'models/gemini-1.5-pro-latest'
+                'models/gemini-3.8-flash', 'models/gemini-3.7-flash',
+                'models/gemini-3.5-flash', 'models/gemini-2.5-flash',
+                'models/gemini-1.5-flash-latest'
             ]
             for pref in preferences:
                 if pref in available_models:
-                    print(f"\033[90m[Auto-Config] Modelo seleccionado: {pref}\033[0m")
                     return pref
             if available_models:
-                fallback = available_models[0]
-                print(f"\033[93m[Auto-Config] Usando modelo de reserva: {fallback}\033[0m")
-                return fallback
-            raise ValueError("No hay modelos generateContent disponibles para esta API Key.")
+                return available_models[0]
+            raise ValueError("No hay modelos generateContent disponibles.")
         except Exception as e:
-            print(f"\033[91mError verificando modelos: {e}\033[0m")
             return 'models/gemini-1.5-flash-latest'
 
     def _load_history(self):
@@ -98,10 +85,7 @@ class GeminiSessionManager:
         for message in self.chat_session.history:
             try:
                 parts_text = [part.text for part in message.parts]
-                formatted_history.append({
-                    "role": message.role,
-                    "parts": parts_text
-                })
+                formatted_history.append({"role": message.role, "parts": parts_text})
             except AttributeError:
                  pass
         with open(self.history_file, 'w', encoding='utf-8') as f:
@@ -120,11 +104,20 @@ class GeminiSessionManager:
             response = self.chat_session.send_message(message, request_options={"timeout": 15})
             return response.text, self.current_model_name
         except Exception as e:
-            print(f"\n\033[93m[Alerta] Falla en API de Gemini ({e}). Intentando fallback local...\033[0m")
+            print(f"\n\033[93m[Alerta] Falla en API de Gemini ({e}).\033[0m")
             
             if self.ollama_fallback.is_available():
-                 print(f"\033[90m[Ollama] Conectando con modelo local '{self.ollama_fallback.model_name}'...\033[0m")
-                 response_text = self.ollama_fallback.generate_response(message, self.system_prompt)
-                 return response_text, f"OllamaLocal ({self.ollama_fallback.model_name})"
+                print(f"\033[93m[UI] Abriendo selector de Ollama local (Pop-up)...\033[0m")
+                
+                # Desplegar interfaz gráfica
+                selected_model = show_model_selector(self.ollama_fallback.api_url)
+                
+                if selected_model:
+                    print(f"\033[90m[Ollama] Conectando con modelo '{selected_model}'...\033[0m")
+                    self.ollama_fallback.model_name = selected_model
+                    response_text = self.ollama_fallback.generate_response(message, self.system_prompt)
+                    return response_text, f"OllamaLocal ({selected_model})"
+                else:
+                    return "El usuario canceló la selección de modelo local en el Pop-up.", "Sistema Cancelado"
             else:
                  return f"Error crítico: API falló y Ollama no responde. Detalle: {e}", "Sistema Fallido"
