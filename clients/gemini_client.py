@@ -34,7 +34,11 @@ class GeminiSessionManager:
         if not api_key:
             raise ValueError("No se encontró GEMINI_API_KEY en el archivo .env")
             
+        # FIX SDK QUIRK: La API de subida de archivos de Google a veces ignora genai.configure() 
+        # y busca estrictamente la variable de entorno GOOGLE_API_KEY
+        os.environ["GOOGLE_API_KEY"] = api_key
         genai.configure(api_key=api_key)
+        
         self.session_id = session_id
         self.db = db_manager
         self.system_prompt = system_prompt
@@ -46,7 +50,6 @@ class GeminiSessionManager:
         self.pools = self._build_dynamic_pools()
         self.history = self.db.load_history(self.session_id)
         
-        # Filtramos para asegurarnos de arrancar con un modelo que sí admita multiturno
         valid_fast_models = [m for m in self.pools['fast'] if 'tts' not in m]
         self.current_model_name = valid_fast_models[0] if valid_fast_models else 'models/gemini-1.5-flash-latest'
         
@@ -58,11 +61,7 @@ class GeminiSessionManager:
         pools = {'router': [], 'fast': [], 'pro': []}
         try:
             raw_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            
-            # EXCLUSIÓN CRÍTICA: Los modelos TTS (Text-to-Speech) de Gemini no soportan objetos de chat (multiturno).
-            # Debemos filtrarlos de los pools que se usan para la sesión de chat.
             chat_models = [m for m in raw_models if 'tts' not in m]
-            
             multimodal_models = [m for m in chat_models if ('1.5' in m or '2.' in m or '3.' in m or 'vision' in m) and 'embedding' not in m and 'aqa' not in m]
             
             pools['router'] = sorted([m for m in multimodal_models if '8b' in m or 'flash' in m], reverse=True)
@@ -124,25 +123,22 @@ class GeminiSessionManager:
         
         print(f"\033[93m[⚙️ Ejecutando en pool {target_pool.upper()}: {self.current_model_name}...]\033[0m", end="\r", flush=True)
         
-        # Procesamiento Multimodal para Gemini
-        gemini_parts = [message]
-        uploaded_gemini_files = []
-        
-        if attached_files:
-            print("\n\033[90m[Gemini] Subiendo archivos a la nube para análisis multimodal...\033[0m")
-            for file_path in attached_files:
-                uploaded = genai.upload_file(file_path)
-                uploaded_gemini_files.append(uploaded)
-                gemini_parts.append(uploaded)
-                
-                # Esperar procesamiento si es video o pdf pesado
-                while uploaded.state.name == "PROCESSING":
-                    print("\033[90mProcesando archivo...\033[0m", end="\r")
-                    time.sleep(2)
-                    uploaded = genai.get_file(uploaded.name)
-        
         try:
-            # Enviamos tanto el texto como los objetos binarios subidos
+            # FIX DE ROBUSTEZ: Movimos el proceso de subida de archivos DENTRO del try...except
+            # para que cualquier error de API se atrape y levante la contingencia.
+            gemini_parts = [message]
+            
+            if attached_files:
+                print("\n\033[90m[Gemini] Subiendo archivos a la nube para análisis multimodal...\033[0m")
+                for file_path in attached_files:
+                    uploaded = genai.upload_file(file_path)
+                    gemini_parts.append(uploaded)
+                    
+                    while uploaded.state.name == "PROCESSING":
+                        print("\033[90mProcesando archivo...\033[0m", end="\r")
+                        time.sleep(2)
+                        uploaded = genai.get_file(uploaded.name)
+            
             response = self.chat_session.send_message(gemini_parts, request_options={"timeout": 60})
             
             in_tokens, out_tokens = 0, 0
@@ -150,7 +146,6 @@ class GeminiSessionManager:
                 in_tokens = response.usage_metadata.prompt_token_count
                 out_tokens = response.usage_metadata.candidates_token_count
             
-            # Formatear parts para la DB (solo los nombres de archivo)
             db_parts = [message] + [f"[Archivo Adjunto: {f}]" for f in attached_files]
                 
             return response.text, self.current_model_name, "Gemini", in_tokens, out_tokens, error_info, db_parts
@@ -158,7 +153,6 @@ class GeminiSessionManager:
         except Exception as e:
             error_msg = str(e)
             
-            # --- ESTRATEGIA DE MITIGACIÓN PARA ERROR 429 ---
             if "429" in error_msg and "quota" in error_msg.lower():
                 print(f"\n\033[93m[Cuota Agotada] El modelo {self.current_model_name} agotó su cuota.\033[0m")
                 if self.current_model_name in self.pools[target_pool]:
@@ -166,14 +160,13 @@ class GeminiSessionManager:
                 
                 if self.pools[target_pool]:
                     nuevo_modelo = self.pools[target_pool][0]
-                    print(f"\033[92m[Rotación Dinámica] Cambiando a {nuevo_modelo}...[0m")
+                    print(f"\033[92m[Rotación Dinámica] Cambiando a {nuevo_modelo}...\033[0m")
                     self._switch_active_model(nuevo_modelo)
                     try:
                         return self.send_message_sync(message, attached_files)
                     except Exception as retry_e:
                         print(f"\n\033[91m[Error en Reintento]: {retry_e}\033[0m")
             
-            # --- CONTINGENCIA (POP-UP) ---
             error_info = {"type": type(e).__name__, "message": error_msg, "fallback": True}
             print(f"\n\033[93m[Alerta] Falla en API de Gemini ({e}).\033[0m")
             
