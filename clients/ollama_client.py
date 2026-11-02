@@ -1,4 +1,6 @@
 import requests
+import os
+from clients.file_manager import encode_image_base64, extract_text_from_doc
 
 class OllamaFallbackManager:
     def __init__(self, preferred_models=None, api_url="http://localhost:11434/api"):
@@ -25,10 +27,9 @@ class OllamaFallbackManager:
         except requests.exceptions.RequestException:
             return False
 
-    def generate_response(self, prompt, system_prompt, history=None):
+    def generate_response(self, prompt, system_prompt, history=None, attached_files=None):
         if not self.model_name: return "Error: No hay modelo local configurado."
         
-        # Construimos el texto del historial para Ollama (endpoint /generate)
         history_text = ""
         if history:
             for msg in history:
@@ -36,13 +37,29 @@ class OllamaFallbackManager:
                 content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
                 history_text += f"{role_name}: {content}\n"
                 
-        full_prompt = f"{system_prompt}\n\n{history_text}Usuario: {prompt}\nAsistente:"
+        # Procesamiento de archivos adjuntos locales
+        images_b64 = []
+        docs_text = ""
+        if attached_files:
+            for fpath in attached_files:
+                ext = os.path.splitext(fpath)[1].lower()
+                if ext in ['.png', '.jpg', '.jpeg', '.webp']:
+                    images_b64.append(encode_image_base64(fpath))
+                else:
+                    docs_text += f"\n--- Contenido de {os.path.basename(fpath)} ---\n"
+                    docs_text += extract_text_from_doc(fpath) + "\n"
+        
+        full_prompt = f"{system_prompt}\n\n{history_text}Usuario: {docs_text}\n{prompt}\nAsistente:"
         
         payload = {
             "model": self.model_name,
             "prompt": full_prompt,
             "stream": False
         }
+        
+        if images_b64:
+            payload["images"] = images_b64
+            
         try:
             response = requests.post(f"{self.api_url}/generate", json=payload, timeout=120)
             response.raise_for_status()

@@ -1,8 +1,10 @@
 import sys
 import time
 import os
+import uuid
 from clients.gemini_client import GeminiSessionManager
 from database.db_manager import DBManager
+from clients.file_manager import scan_media_and_select
 
 default_system_prompt = """
 Eres un asistente experimentado en brindar soluciones rápidas y atinadas a un publico exigente que siempre se le ocurre nuevos pedidos y confian en ti para ayudarles o dejarles claro las limitaciones en pro de poder obtener resultados excepcionales, para ello tienes equipado un sistema multiagente con la filosofia Ayni y estas dispuesto a adaptarlo y mejorarlo en busqueda de cada vez dar mejores soluciones.
@@ -18,14 +20,16 @@ def load_system_prompt(filepath):
     return default_system_prompt
 
 def main():
-    print("=== Terminal Modular Ayni (Historial Persistente en DB) ===")
+    print("=== Terminal Modular Ayni (Soporte Multimodal Integral) ===")
+    
+    # Crear carpeta media inicial
+    os.makedirs("media", exist_ok=True)
     
     db = DBManager()
     if not db.Session:
         print("\033[91mNo se pudo conectar a la base de datos. Historial será efímero.\033[0m")
     
-    # Podrías generar un UUID nuevo cada vez, o reutilizar uno para mantener una sesión de prueba activa
-    session_id = "SESION_PRUEBA_AYNI_001" 
+    session_id = "SESION_PRUEBA_AYNI_002" 
     current_skill = "AGENTS.md"
     
     print("Escribe 'salir', 'quit' o 'exit' para terminar.\n")
@@ -45,15 +49,16 @@ def main():
                 break
             if not user_input.strip(): continue
 
-            print("\033[93m[⚙️ Procesando intención y enrutando...]\033[0m", end="\r", flush=True)
-            
+            # 1. Pre-Procesamiento Multimodal (Interceptor)
+            archivos_seleccionados = scan_media_and_select(user_input)
+            if archivos_seleccionados:
+                print(f"\033[96m[Archivos a enviar]: {', '.join([os.path.basename(f) for f in archivos_seleccionados])}\033[0m")
+
             start_time = time.time()
-            response_text, active_model, provider, in_tokens, out_tokens, error_info = manager.send_message_sync(user_input)
+            response_text, active_model, provider, in_tokens, out_tokens, error_info, db_parts = manager.send_message_sync(user_input, archivos_seleccionados)
             elapsed_ms = round((time.time() - start_time) * 1000, 2)
             
-            print("\033[K", end="") 
-            
-            # Logueo de métricas principales y captura del ID
+            # Logueo de métricas en PostgreSQL
             interaction_id = db.log_interaction(
                 session_id=session_id,
                 user_input=user_input,
@@ -67,9 +72,8 @@ def main():
                 error_data=error_info
             )
             
-            # Sincronizamos explícitamente el turno de chat en la BD y actualizamos memoria local
             if interaction_id:
-                manager._sync_history_to_db(interaction_id, user_input, response_text)
+                manager._sync_history_to_db(interaction_id, db_parts, response_text)
             
             if provider == "Ollama":
                  print(f"\033[35m{active_model}:\033[0m {response_text}\n")
