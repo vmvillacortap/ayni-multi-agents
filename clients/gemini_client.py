@@ -38,7 +38,6 @@ class GeminiSessionManager:
         self.session_id = session_id
         self.db = db_manager
         self.system_prompt = system_prompt
-        # Inyectamos la nueva herramienta para guardar archivos
         self.tools = [obtener_hora_local, buscar_en_internet, guardar_documento]
         
         self.ollama_fallback = OllamaFallbackManager() 
@@ -47,7 +46,10 @@ class GeminiSessionManager:
         self.pools = self._build_dynamic_pools()
         self.history = self.db.load_history(self.session_id)
         
-        self.current_model_name = self.pools['fast'][0] if self.pools['fast'] else 'models/gemini-1.5-flash-latest'
+        # Filtramos para asegurarnos de arrancar con un modelo que sí admita multiturno
+        valid_fast_models = [m for m in self.pools['fast'] if 'tts' not in m]
+        self.current_model_name = valid_fast_models[0] if valid_fast_models else 'models/gemini-1.5-flash-latest'
+        
         self.model = None
         self.chat_session = None
         self._switch_active_model(self.current_model_name)
@@ -56,7 +58,13 @@ class GeminiSessionManager:
         pools = {'router': [], 'fast': [], 'pro': []}
         try:
             raw_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            multimodal_models = [m for m in raw_models if ('1.5' in m or '2.' in m or '3.' in m or 'vision' in m) and 'embedding' not in m and 'aqa' not in m]
+            
+            # EXCLUSIÓN CRÍTICA: Los modelos TTS (Text-to-Speech) de Gemini no soportan objetos de chat (multiturno).
+            # Debemos filtrarlos de los pools que se usan para la sesión de chat.
+            chat_models = [m for m in raw_models if 'tts' not in m]
+            
+            multimodal_models = [m for m in chat_models if ('1.5' in m or '2.' in m or '3.' in m or 'vision' in m) and 'embedding' not in m and 'aqa' not in m]
+            
             pools['router'] = sorted([m for m in multimodal_models if '8b' in m or 'flash' in m], reverse=True)
             pools['pro'] = sorted([m for m in multimodal_models if 'pro' in m], reverse=True)
             pools['fast'] = sorted([m for m in multimodal_models if 'flash' in m and '8b' not in m], reverse=True)
@@ -158,7 +166,7 @@ class GeminiSessionManager:
                 
                 if self.pools[target_pool]:
                     nuevo_modelo = self.pools[target_pool][0]
-                    print(f"\033[92m[Rotación Dinámica] Cambiando a {nuevo_modelo}...\033[0m")
+                    print(f"\033[92m[Rotación Dinámica] Cambiando a {nuevo_modelo}...[0m")
                     self._switch_active_model(nuevo_modelo)
                     try:
                         return self.send_message_sync(message, attached_files)
