@@ -1,7 +1,6 @@
 import sys
 import time
 import os
-import uuid
 from clients.gemini_client import GeminiSessionManager
 from database.db_manager import DBManager
 
@@ -19,17 +18,21 @@ def load_system_prompt(filepath):
     return default_system_prompt
 
 def main():
-    print("=== Terminal Modular Ayni (Telemetría DB PostgreSQL) ===")
+    print("=== Terminal Modular Ayni (Historial Persistente en DB) ===")
     
     db = DBManager()
-    session_id = str(uuid.uuid4())
+    if not db.Session:
+        print("\033[91mNo se pudo conectar a la base de datos. Historial será efímero.\033[0m")
+    
+    # Podrías generar un UUID nuevo cada vez, o reutilizar uno para mantener una sesión de prueba activa
+    session_id = "SESION_PRUEBA_AYNI_001" 
     current_skill = "AGENTS.md"
     
     print("Escribe 'salir', 'quit' o 'exit' para terminar.\n")
     system_instructions = load_system_prompt(current_skill)
     
     try:
-        manager = GeminiSessionManager(system_prompt=system_instructions)
+        manager = GeminiSessionManager(session_id=session_id, db_manager=db, system_prompt=system_instructions)
     except Exception as e:
         print(f"\033[91mError de inicialización:\033[0m {e}")
         sys.exit(1)
@@ -38,7 +41,7 @@ def main():
         try:
             user_input = input("\n\033[92mTú:\033[0m ")
             if user_input.lower().strip() in ['salir', 'quit', 'exit']:
-                manager.save_history()
+                print("\nHistorial consolidado en PostgreSQL. Cerrando sesión.")
                 break
             if not user_input.strip(): continue
 
@@ -50,7 +53,8 @@ def main():
             
             print("\033[K", end="") 
             
-            db.log_interaction(
+            # Logueo de métricas principales y captura del ID
+            interaction_id = db.log_interaction(
                 session_id=session_id,
                 user_input=user_input,
                 response_text=response_text,
@@ -63,6 +67,10 @@ def main():
                 error_data=error_info
             )
             
+            # Sincronizamos explícitamente el turno de chat en la BD y actualizamos memoria local
+            if interaction_id:
+                manager._sync_history_to_db(interaction_id, user_input, response_text)
+            
             if provider == "Ollama":
                  print(f"\033[35m{active_model}:\033[0m {response_text}\n")
             elif provider == "Manus":
@@ -73,7 +81,6 @@ def main():
             print(f"\033[90m[Metricas DB] Motor: {active_model} | Tokens In: {in_tokens} Out: {out_tokens} | Tiempo: {elapsed_ms}ms\033[0m")
             
         except KeyboardInterrupt:
-            manager.save_history()
             break
         except Exception as e:
             print(f"\n\033[91mError de ejecución:\033[0m {str(e)}\n")
