@@ -39,40 +39,78 @@ class GeminiSessionManager:
         self.ollama_fallback = OllamaFallbackManager() 
         self.manus_fallback = ManusFallbackManager()
         
-        # Guardamos la lista de preferencias dinámicas para poder rotarlas en caso de 429
-        self.dynamic_preferences = [
-            'models/gemini-3.8-flash',
-            'models/gemini-3.7-flash', 
-            'models/gemini-3.5-flash', 
-            'models/gemini-2.5-flash', 
-            'models/gemini-1.5-flash-latest'
-        ]
-        
-        self.current_model_name = self._get_best_available_model()
-        self._init_model()
-
-    def _init_model(self):
-        """Inicializa o reinicializa el modelo activo y la sesión de chat."""
-        self.model = genai.GenerativeModel(
-            model_name=self.current_model_name, 
-            system_instruction=self.system_prompt,
-            tools=self.tools
-        )
+        # 1. Construir pools de modelos dinámicos
+        self.pools = self._build_dynamic_pools()
         self.history = self._load_history()
-        self.chat_session = self.model.start_chat(
-            history=self.history,
-            enable_automatic_function_calling=True
-        )
+        
+        # Inicializamos con el modelo más rápido por defecto
+        self.current_model_name = self.pools['fast'][0] if self.pools['fast'] else 'models/gemini-1.5-flash-latest'
+        self.model = None
+        self.chat_session = None
+        self._switch_active_model(self.current_model_name)
 
-    def _get_best_available_model(self):
+    def _build_dynamic_pools(self):
+        """Clasifica los modelos disponibles en la API en pools especializados."""
+        pools = {'router': [], 'fast': [], 'pro': []}
         try:
-            available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            for pref in self.dynamic_preferences:
-                if pref in available_models: return pref
-            if available_models: return available_models[0]
-            raise ValueError("No hay modelos generateContent disponibles.")
+            raw_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            
+            # Pool Router: El modelo más ligero y rápido exclusivo para clasificar intenciones (ej. flash-8b)
+            pools['router'] = sorted([m for m in raw_models if '8b' in m or 'flash' in m], reverse=True)
+            
+            # Pool PRO (Alta complejidad / Argon): Modelos de razonamiento profundo
+            pools['pro'] = sorted([m for m in raw_models if 'pro' in m], reverse=True)
+            
+            # Pool FAST (Baja complejidad / Tareas cotidianas): Modelos veloces y eficientes
+            pools['fast'] = sorted([m for m in raw_models if 'flash' in m and '8b' not in m], reverse=True)
+            
+            # Fallbacks si un pool queda vacío
+            if not pools['pro']: pools['pro'] = raw_models[:1]
+            if not pools['fast']: pools['fast'] = raw_models[:1]
+            if not pools['router']: pools['router'] = pools['fast']
+            
+            print(f"\033[90m[API Sync] Pools dinámicos creados: {len(pools['pro'])} Pro, {len(pools['fast'])} Fast, {len(pools['router'])} Routers.\033[0m")
+            return pools
+        except Exception as e:
+            print(f"\n\033[91m[Alerta] Error sincronizando pools: {e}\033[0m")
+            return {'router': ['models/gemini-1.5-flash-latest'], 'fast': ['models/gemini-1.5-flash-latest'], 'pro': ['models/gemini-1.5-pro-latest']}
+
+    def _switch_active_model(self, model_name):
+        """Reconstruye el objeto de chat manteniendo el historial intacto al cambiar de motor."""
+        if self.current_model_name != model_name or self.chat_session is None:
+            self.current_model_name = model_name
+            self.model = genai.GenerativeModel(
+                model_name=self.current_model_name, 
+                system_instruction=self.system_prompt,
+                tools=self.tools
+            )
+            # Reinyectamos el historial acumulado en el nuevo motor
+            self.chat_session = self.model.start_chat(
+                history=self.history,
+                enable_automatic_function_calling=True
+            )
+
+    def _analyze_intent(self, prompt):
+        """Usa el modelo router para decidir qué pool de modelos debe responder."""
+        router_model = self.pools['router'][0]
+        analyzer = genai.GenerativeModel(model_name=router_model)
+        
+        sys_prompt = """Clasifica la petición del usuario. Responde ÚNICAMENTE con un JSON con este formato exacto:
+        {"complexity": "low" | "high", "is_complaint": true | false}
+        Reglas:
+        - "high" si requiere código complejo, matemáticas avanzadas, análisis profundo o análisis de archivos adjuntos (multimodal).
+        - "low" si es una pregunta general, saludos, o consultas de internet sencillas.
+        - "is_complaint": true si el usuario se queja de una respuesta anterior (ej. "eso no es lo que pedí", "está mal", "hazlo mejor", "no es el esperado")."""
+        
+        try:
+            res = analyzer.generate_content(
+                f"{sys_prompt}\n\nPetición: {prompt}",
+                generation_config=genai.types.GenerationConfig(response_mime_type="application/json", temperature=0.0)
+            )
+            return json.loads(res.text)
         except Exception:
-            return 'models/gemini-1.5-flash-latest'
+            # En caso de fallo del router, asumimos complejidad baja por seguridad de cuota
+            return {"complexity": "low", "is_complaint": False}
 
     def _load_history(self):
         if os.path.exists(self.history_file):
@@ -83,7 +121,7 @@ class GeminiSessionManager:
 
     def save_history(self):
         formatted_history = []
-        for message in self.chat_session.history:
+        for message in self.history:
             try:
                 formatted_history.append({"role": message.role, "parts": [part.text for part in message.parts]})
             except AttributeError: pass
@@ -92,8 +130,29 @@ class GeminiSessionManager:
 
     def send_message_sync(self, message):
         error_info = None
+        
+        # 1. Enrutamiento Semántico
+        print("\033[93m[🧠 Enrutador Analizando Complejidad e Intención...]\033[0m", end="\r", flush=True)
+        intent = self._analyze_intent(message)
+        
+        if intent.get('is_complaint', False):
+            print("\033[93m[Ayni] Queja detectada. Escalando al modelo PRO (Argon) para mejorar resultados.\033[0m")
+            target_pool = 'pro'
+        elif intent.get('complexity', 'low') == 'high':
+            target_pool = 'pro'
+        else:
+            target_pool = 'fast'
+            
+        # Seleccionamos el mejor modelo del pool objetivo y preparamos la sesión
+        self._switch_active_model(self.pools[target_pool][0])
+        
+        # 2. Ejecución
+        print(f"\033[93m[⚙️ Ejecutando en pool {target_pool.upper()}: {self.current_model_name}...]\033[0m", end="\r", flush=True)
+        
         try:
             response = self.chat_session.send_message(message, request_options={"timeout": 15})
+            # Actualizamos el historial maestro local
+            self.history = self.chat_session.history
             
             in_tokens, out_tokens = 0, 0
             if hasattr(response, 'usage_metadata'):
@@ -105,51 +164,53 @@ class GeminiSessionManager:
         except Exception as e:
             error_msg = str(e)
             
-            # --- ESTRATEGIA DE MITIGACIÓN PARA ERROR 429 (CUOTA EXCEDIDA) ---
+            # --- MITIGACIÓN 429 CON ROTACIÓN DE POOLS ---
             if "429" in error_msg and "quota" in error_msg.lower():
-                print(f"\n\033[93m[Cuota Agotada] El modelo {self.current_model_name} superó el límite gratuito.\033[0m")
+                print(f"\n\033[93m[Cuota Agotada] El modelo {self.current_model_name} agotó su cuota.\033[0m")
                 
-                # Remover el modelo agotado de la lista dinámica
-                if self.current_model_name in self.dynamic_preferences:
-                    self.dynamic_preferences.remove(self.current_model_name)
+                # Eliminamos el modelo bloqueado de su pool correspondiente
+                if self.current_model_name in self.pools[target_pool]:
+                    self.pools[target_pool].remove(self.current_model_name)
                 
-                if self.dynamic_preferences:
-                    nuevo_modelo = self._get_best_available_model()
-                    if nuevo_modelo != self.current_model_name:
-                        print(f"\033[92m[Rotación Dinámica] Cambiando familia al modelo: {nuevo_modelo}... Reintentando.\033[0m")
-                        self.current_model_name = nuevo_modelo
-                        self._init_model() # Reinicia la sesión con el nuevo modelo
-                        
-                        # Reintento recursivo (solo 1 nivel profundo por mensaje para evitar bucles)
-                        try:
-                            # Imprimimos de nuevo el indicador para que no se borre el flujo en consola
-                            print("\033[93m[⚙️ Procesando intención y enrutando...]\033[0m", end="\r", flush=True)
-                            return self.send_message_sync(message)
-                        except Exception as retry_e:
-                            print(f"\n\033[91m[Error en Reintento] El nuevo modelo también falló: {retry_e}\033[0m")
-                            # Si falla el reintento, cae al bloque de fallback estándar abajo
+                if self.pools[target_pool]:
+                    nuevo_modelo = self.pools[target_pool][0]
+                    print(f"\033[92m[Rotación Dinámica] Cambiando a la siguiente opción del pool {target_pool.upper()}: {nuevo_modelo}...\033[0m")
+                    self._switch_active_model(nuevo_modelo)
+                    
+                    try:
+                        return self.send_message_sync(message) # Reintento
+                    except Exception as retry_e:
+                        print(f"\n\033[91m[Error en Reintento]: {retry_e}\033[0m")
                 else:
-                    print("\033[91m[Crítico] Se agotaron todas las familias de modelos de Gemini preferidas.\033[0m")
+                    print(f"\033[91m[Crítico] Pool {target_pool.upper()} completamente agotado.\033[0m")
             
-            # --- ESTRATEGIA ESTÁNDAR DE CONTINGENCIA (POP-UP) ---
+            # --- CONTINGENCIA (POP-UP) ---
             error_info = {"type": type(e).__name__, "message": error_msg, "fallback": True}
-            print(f"\n\033[93m[Alerta] Falla en API de Gemini ({e}). Evaluando alternativas...\033[0m")
+            print(f"\n\033[93m[Alerta] Falla en API de Gemini ({e}).\033[0m")
             
             if self.ollama_fallback.is_available() or self.manus_fallback.is_available():
-                print(f"\033[93m[UI] Abriendo Centro de Contingencia Multi-Agente (Pop-up)...\033[0m")
+                print(f"\033[93m[UI] Abriendo Centro de Contingencia Multi-Agente (Pop-up)...[0m")
                 provider, selected_model = show_model_selector(self.ollama_fallback.api_url, self.manus_fallback.get_models())
                 
                 in_tokens = int(len(message.split()) * 1.3)
-                
                 if provider == "Ollama":
                     resp = self.ollama_fallback.generate_response(message, self.system_prompt)
                     out_tokens = int(len(resp.split()) * 1.3)
+                    
+                    # Añadir al historial manualmente para que no se pierda contexto
+                    self.history.append(type("Msg", (object,), {"role": "user", "parts": [type("Part", (object,), {"text": message})]})())
+                    self.history.append(type("Msg", (object,), {"role": "model", "parts": [type("Part", (object,), {"text": resp})]})())
+                    
                     return resp, selected_model, "Ollama", in_tokens, out_tokens, error_info
                 elif provider == "Manus":
                     resp = self.manus_fallback.generate_response(message, self.system_prompt, selected_model)
                     out_tokens = int(len(resp.split()) * 1.3)
+                    
+                    self.history.append(type("Msg", (object,), {"role": "user", "parts": [type("Part", (object,), {"text": message})]})())
+                    self.history.append(type("Msg", (object,), {"role": "model", "parts": [type("Part", (object,), {"text": resp})]})())
+                    
                     return resp, selected_model, "Manus", in_tokens, out_tokens, error_info
                 else:
                     return "Contingencia cancelada por el usuario.", "Ninguno", "UI", 0, 0, error_info
             else:
-                 return f"Error crítico: API Gemini falló y no hay respaldo.", "Ninguno", "Error", 0, 0, error_info
+                 return f"Error crítico: API falló y no hay respaldo.", "Ninguno", "Error", 0, 0, error_info
