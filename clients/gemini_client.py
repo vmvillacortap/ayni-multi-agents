@@ -5,6 +5,12 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from tavily import TavilyClient
 
+# Importación del módulo local desde la carpeta clients
+from clients.ollama_client import OllamaFallbackManager
+
+# ==========================================
+# DEFINICIÓN DE HERRAMIENTAS (TOOLS)
+# ==========================================
 def obtener_hora_local():
     """Útil para saber la hora, fecha o día actual del sistema."""
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -23,6 +29,9 @@ def buscar_en_internet(consulta: str):
     except Exception as e:
         return f"Error en la búsqueda web: {str(e)}"
 
+# ==========================================
+# CLIENTE PRINCIPAL GEMINI
+# ==========================================
 class GeminiSessionManager:
     def __init__(self, history_file="chat_history.json", system_prompt="Eres un asistente experto."):
         load_dotenv()
@@ -35,10 +44,10 @@ class GeminiSessionManager:
         self.system_prompt = system_prompt
         self.tools = [obtener_hora_local, buscar_en_internet]
         
-        # 1. Búsqueda dinámica del mejor modelo disponible
-        self.current_model_name = self._get_best_available_model()
+        # Gestor de Fallback Instanciado
+        self.ollama_fallback = OllamaFallbackManager() 
         
-        # 2. Inicialización del modelo seguro
+        self.current_model_name = self._get_best_available_model()
         self.model = genai.GenerativeModel(
             model_name=self.current_model_name, 
             system_instruction=self.system_prompt,
@@ -87,18 +96,35 @@ class GeminiSessionManager:
     def save_history(self):
         formatted_history = []
         for message in self.chat_session.history:
-            formatted_history.append({
-                "role": message.role,
-                "parts": [part.text for part in message.parts]
-            })
+            try:
+                parts_text = [part.text for part in message.parts]
+                formatted_history.append({
+                    "role": message.role,
+                    "parts": parts_text
+                })
+            except AttributeError:
+                 pass
         with open(self.history_file, 'w', encoding='utf-8') as f:
             json.dump(formatted_history, f, indent=4, ensure_ascii=False)
 
     def get_token_count(self):
         if not self.chat_session.history:
             return 0
-        return self.model.count_tokens(self.chat_session.history).total_tokens
+        try:
+            return self.model.count_tokens(self.chat_session.history).total_tokens
+        except Exception:
+            return 0
 
     def send_message_sync(self, message):
-        response = self.chat_session.send_message(message)
-        return response.text, self.current_model_name
+        try:
+            response = self.chat_session.send_message(message, request_options={"timeout": 15})
+            return response.text, self.current_model_name
+        except Exception as e:
+            print(f"\n\033[93m[Alerta] Falla en API de Gemini ({e}). Intentando fallback local...\033[0m")
+            
+            if self.ollama_fallback.is_available():
+                 print(f"\033[90m[Ollama] Conectando con modelo local '{self.ollama_fallback.model_name}'...\033[0m")
+                 response_text = self.ollama_fallback.generate_response(message, self.system_prompt)
+                 return response_text, f"OllamaLocal ({self.ollama_fallback.model_name})"
+            else:
+                 return f"Error crítico: API falló y Ollama no responde. Detalle: {e}", "Sistema Fallido"

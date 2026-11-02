@@ -1,19 +1,16 @@
 import sys
 import time
 import os
-from gemini_client import GeminiSessionManager
+from clients.gemini_client import GeminiSessionManager
 
 default_system_prompt = """
 Eres un asistente experimentado en brindar soluciones rápidas y atinadas a un publico exigente que siempre se le ocurre nuevos pedidos y confian en ti para ayudarles o dejarles claro las limitaciones en pro de poder obtener resultados excepcionales, para ello tienes equipado un sistema multiagente con la filosofia Ayni y estas dispuesto a adaptarlo y mejorarlo en busqueda de cada vez dar mejores soluciones.
 """
 
 def load_system_prompt(filepath):
-    """Carga el system prompt desde un archivo Markdown externo."""
     if os.path.exists(filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
             return f.read().strip()
-    
-    # Fallback y creación del archivo si no existe
     try:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(default_system_prompt)
@@ -23,10 +20,9 @@ def load_system_prompt(filepath):
     return default_system_prompt
 
 def main():
-    print("=== Terminal de Gemini Pro (Prompts Externos en .md) ===")
+    print("=== Terminal Modular NEXO (Gemini + Ollama) ===")
     print("Escribe 'salir', 'quit' o 'exit' para terminar.\n")
     
-    # Archivo de configuración central
     prompt_file = "AGENTS.md"
     system_instructions = load_system_prompt(prompt_file)
     
@@ -57,11 +53,19 @@ def main():
             print("\033[K", end="") 
             
             model_display = active_model.split('/')[-1]
-            print(f"\033[94mGemini ({model_display}):\033[0m {response_text}\n")
+            
+            if "Ollama" in active_model:
+                 print(f"\033[35m{model_display}:\033[0m {response_text}\n")
+            else:
+                 print(f"\033[94mGemini ({model_display}):\033[0m {response_text}\n")
             
             elapsed_time = round(time.time() - start_time, 2)
-            tokens = manager.get_token_count()
-            print(f"\033[90m[Contexto: {tokens} tokens | Engine: {model_display} | Tiempo: {elapsed_time}s]\033[0m")
+            
+            if "Ollama" not in active_model:
+                tokens = manager.get_token_count()
+                print(f"\033[90m[Contexto: {tokens} tokens | Engine: {model_display} | Tiempo: {elapsed_time}s]\033[0m")
+            else:
+                 print(f"\033[90m[Engine: {model_display} | Tiempo: {elapsed_time}s]\033[0m")
             
         except KeyboardInterrupt:
             print("\nInterrupción detectada. Guardando historial...")
