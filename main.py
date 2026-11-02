@@ -8,6 +8,13 @@ from clients.file_manager import scan_media_and_select
 
 default_system_prompt = """
 Eres un asistente experimentado en brindar soluciones rápidas y atinadas a un publico exigente que siempre se le ocurre nuevos pedidos y confian en ti para ayudarles o dejarles claro las limitaciones en pro de poder obtener resultados excepcionales, para ello tienes equipado un sistema multiagente con la filosofia Ayni y estas dispuesto a adaptarlo y mejorarlo en busqueda de cada vez dar mejores soluciones.
+
+REGLAS DE ARCHIVOS (Escritura y Subcarpetas):
+1. Solo usa la herramienta `guardar_documento` si se te pide explícitamente generar o guardar un archivo.
+2. Para el parámetro `subcarpeta`: 
+   - Si analizaste un archivo que YA estaba dentro de una subcarpeta en `media/` (ej. `media/proyecto_x/doc.txt`), DEBES reutilizar ese mismo nombre de subcarpeta (ej. `proyecto_x`).
+   - ÚNICAMENTE crearás un nuevo nombre de subcarpeta temática si el archivo analizado NO estaba en `media/` o si la petición no incluyó ningún archivo de entrada.
+3. El sistema antepondrá la fecha actual (YYYYMMDD_) al nombre del archivo de forma automática, no lo hagas tú.
 """
 
 def load_system_prompt(filepath):
@@ -20,16 +27,14 @@ def load_system_prompt(filepath):
     return default_system_prompt
 
 def main():
-    print("=== Terminal Modular Ayni (Soporte Multimodal Integral) ===")
+    print("=== Terminal Modular Ayni (Escáner de Proyecto Integral) ===")
     
-    # Crear carpeta media inicial
     os.makedirs("media", exist_ok=True)
-    
     db = DBManager()
     if not db.Session:
         print("\033[91mNo se pudo conectar a la base de datos. Historial será efímero.\033[0m")
     
-    session_id = "SESION_PRUEBA_AYNI_002" 
+    session_id = "SESION_PRUEBA_AYNI_003" 
     current_skill = "AGENTS.md"
     
     print("Escribe 'salir', 'quit' o 'exit' para terminar.\n")
@@ -49,7 +54,6 @@ def main():
                 break
             if not user_input.strip(): continue
 
-            # 1. Pre-Procesamiento Multimodal (Interceptor)
             archivos_seleccionados = scan_media_and_select(user_input)
             if archivos_seleccionados:
                 print(f"\033[96m[Archivos a enviar]: {', '.join([os.path.basename(f) for f in archivos_seleccionados])}\033[0m")
@@ -58,7 +62,6 @@ def main():
             response_text, active_model, provider, in_tokens, out_tokens, error_info, db_parts = manager.send_message_sync(user_input, archivos_seleccionados)
             elapsed_ms = round((time.time() - start_time) * 1000, 2)
             
-            # Logueo de métricas en PostgreSQL
             interaction_id = db.log_interaction(
                 session_id=session_id,
                 user_input=user_input,
@@ -76,11 +79,11 @@ def main():
                 manager._sync_history_to_db(interaction_id, db_parts, response_text)
             
             if provider == "Ollama":
-                 print(f"\033[35m{active_model}:\033[0m {response_text}\n")
+                 print(f"\033[35m{active_model}: [0m {response_text}\n")
             elif provider == "Manus":
-                 print(f"\033[36m{active_model}:\033[0m {response_text}\n")
+                 print(f"\033[36m{active_model}: [0m {response_text}\n")
             else:
-                 print(f"\033[94mGemini ({active_model}):\033[0m {response_text}\n")
+                 print(f"\033[94mGemini ({active_model}): [0m {response_text}\n")
             
             print(f"\033[90m[Metricas DB] Motor: {active_model} | Tokens In: {in_tokens} Out: {out_tokens} | Tiempo: {elapsed_ms}ms\033[0m")
             
