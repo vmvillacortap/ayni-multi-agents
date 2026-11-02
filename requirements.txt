@@ -1,2 +1,6 @@
 google-generativeai
 python-dotenv
+tavily-python
+requests
+sqlalchemy
+psycopg2-binary
