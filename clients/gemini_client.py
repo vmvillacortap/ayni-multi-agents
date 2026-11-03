@@ -10,7 +10,7 @@ from clients.ollama_client import OllamaFallbackManager
 from clients.manus_client import ManusFallbackManager
 from clients.fallback_ui import show_model_selector
 from database.db_manager import DBManager
-from clients.file_manager import guardar_documento
+from clients.file_manager import guardar_documento, extract_text_from_doc
 
 def obtener_hora_local():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -29,13 +29,11 @@ def buscar_en_internet(consulta: str):
 
 class GeminiSessionManager:
     def __init__(self, session_id, db_manager, system_prompt="Eres un asistente experto."):
-        load_dotenv()
+        load_dotenv(override=True)
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("No se encontró GEMINI_API_KEY en el archivo .env")
             
-        # FIX SDK QUIRK: La API de subida de archivos de Google a veces ignora genai.configure() 
-        # y busca estrictamente la variable de entorno GOOGLE_API_KEY
         os.environ["GOOGLE_API_KEY"] = api_key
         genai.configure(api_key=api_key)
         
@@ -119,25 +117,42 @@ class GeminiSessionManager:
         intent = self._analyze_intent(message, attached_files)
         
         target_pool = 'pro' if (intent.get('is_complaint', False) or intent.get('complexity', 'low') == 'high' or attached_files) else 'fast'
+        
+        # --- MEJORA: ESCALADO INVERSO ---
+        # Si el enrutador elige PRO, pero la familia PRO está agotada (ej. modelos deprecados o sin cuota), 
+        # delegamos el trabajo a la familia FAST antes de rendirnos y saltar a Ollama/Manus.
+        if target_pool == 'pro' and not self.pools['pro']:
+            print("\n\033[93m[Ayni] Pool PRO agotado. Redirigiendo petición compleja al Pool FAST (Flash)...\033[0m")
+            target_pool = 'fast'
+            
+        # Si definitivamente no quedan modelos en el pool objetivo, forzamos la contingencia manual.
+        if not self.pools[target_pool]:
+            raise Exception("Todos los modelos de Gemini aplicables están agotados o deprecados.")
+            
         self._switch_active_model(self.pools[target_pool][0])
         
-        print(f"\033[93m[⚙️ Ejecutando en pool {target_pool.upper()}: {self.current_model_name}...]\033[0m", end="\r", flush=True)
+        print(f"\033[93m[⚙️ Ejecutando en pool {target_pool.upper()}: {self.current_model_name}...]     \033[0m", end="\r", flush=True)
         
         try:
-            # FIX DE ROBUSTEZ: Movimos el proceso de subida de archivos DENTRO del try...except
-            # para que cualquier error de API se atrape y levante la contingencia.
             gemini_parts = [message]
             
             if attached_files:
-                print("\n\033[90m[Gemini] Subiendo archivos a la nube para análisis multimodal...\033[0m")
+                print("\n\033[90m[Gemini] Procesando archivos adjuntos...\033[0m")
                 for file_path in attached_files:
-                    uploaded = genai.upload_file(file_path)
-                    gemini_parts.append(uploaded)
-                    
-                    while uploaded.state.name == "PROCESSING":
-                        print("\033[90mProcesando archivo...\033[0m", end="\r")
-                        time.sleep(2)
-                        uploaded = genai.get_file(uploaded.name)
+                    ext = os.path.splitext(file_path)[1].lower()
+                    if ext in ['.txt', '.md', '.csv', '.json', '.py']:
+                        file_content = extract_text_from_doc(file_path)
+                        gemini_parts.append(f"\n--- Contenido de {os.path.basename(file_path)} ---\n{file_content}\n")
+                    else:
+                        print(f"\033[90mSubiendo {os.path.basename(file_path)} a la API de Gemini...\033[0m", end="\r")
+                        uploaded = genai.upload_file(file_path)
+                        gemini_parts.append(uploaded)
+                        
+                        while uploaded.state.name == "PROCESSING":
+                            print("\033[90mProcesando archivo en la nube...\033[0m", end="\r")
+                            time.sleep(2)
+                            uploaded = genai.get_file(uploaded.name)
+                        print(f"\033[90mSubido y procesado: {os.path.basename(file_path)}          \033[0m")
             
             response = self.chat_session.send_message(gemini_parts, request_options={"timeout": 60})
             
@@ -153,22 +168,23 @@ class GeminiSessionManager:
         except Exception as e:
             error_msg = str(e)
             
-            if "429" in error_msg and "quota" in error_msg.lower():
-                print(f"\n\033[93m[Cuota Agotada] El modelo {self.current_model_name} agotó su cuota.\033[0m")
+            # Comprobación de errores tratables (Cuota o Deprecados)
+            is_quota_or_deprecated = any(err in error_msg.lower() for err in ["429", "quota", "404", "not found", "403"])
+            
+            if is_quota_or_deprecated:
+                print(f"\n\033[93m[Rotación Activada] El modelo {self.current_model_name} falló (Cuota/Deprecado).\033[0m")
                 if self.current_model_name in self.pools[target_pool]:
                     self.pools[target_pool].remove(self.current_model_name)
                 
-                if self.pools[target_pool]:
-                    nuevo_modelo = self.pools[target_pool][0]
-                    print(f"\033[92m[Rotación Dinámica] Cambiando a {nuevo_modelo}...\033[0m")
-                    self._switch_active_model(nuevo_modelo)
-                    try:
-                        return self.send_message_sync(message, attached_files)
-                    except Exception as retry_e:
-                        print(f"\n\033[91m[Error en Reintento]: {retry_e}\033[0m")
+                # REINTENTO RECURSIVO: Si el pool PRO se vació en la línea anterior, 
+                # la nueva llamada activará el "Escalado Inverso" y pasará al pool FAST.
+                try:
+                    return self.send_message_sync(message, attached_files)
+                except Exception as retry_e:
+                    error_msg = str(retry_e)
             
             error_info = {"type": type(e).__name__, "message": error_msg, "fallback": True}
-            print(f"\n\033[93m[Alerta] Falla en API de Gemini ({e}).\033[0m")
+            print(f"\n\033[93m[Alerta] Falla en la cascada de Gemini ({error_msg}).\033[0m")
             
             if self.ollama_fallback.is_available() or self.manus_fallback.is_available():
                 print(f"\033[93m[UI] Abriendo Centro de Contingencia Multi-Agente (Pop-up)...\033[0m")

@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 venv/
 # Conservar estructura de main/, AGENTS.md y subagentes .md
+
+
+# media
+media/
