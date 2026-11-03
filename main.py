@@ -1,20 +1,19 @@
 import sys
-import time
 import os
-import uuid
-from clients.gemini_client import GeminiSessionManager
-from database.db_manager import DBManager
+from dotenv import load_dotenv
+from orchestrator import AyniOrchestrator
 from clients.file_manager import scan_media_and_select
 
 default_system_prompt = """
 Eres un asistente experimentado en brindar soluciones rápidas y atinadas a un publico exigente que siempre se le ocurre nuevos pedidos y confian en ti para ayudarles o dejarles claro las limitaciones en pro de poder obtener resultados excepcionales, para ello tienes equipado un sistema multiagente con la filosofia Ayni y estas dispuesto a adaptarlo y mejorarlo en busqueda de cada vez dar mejores soluciones.
 
-REGLAS DE ARCHIVOS (Escritura y Subcarpetas):
+REGLAS DE ARCHIVOS Y GENERACIÓN VISUAL:
 1. Solo usa la herramienta `guardar_documento` si se te pide explícitamente generar o guardar un archivo.
-2. Para el parámetro `subcarpeta`: 
+2. Si te piden INFOGRAFÍAS, DIAGRAMAS o IMÁGENES: Dado que no puedes generar píxeles directamente (PNG/JPG), DEBES programar la visualización utilizando código **SVG**, **HTML interactivo** o Markdown con **Mermaid.js**, y guardarlo obligatoriamente en disco mediante tu herramienta.
+3. Para el parámetro `subcarpeta`: 
    - Si analizaste un archivo que YA estaba dentro de una subcarpeta en `media/` (ej. `media/proyecto_x/doc.txt`), DEBES reutilizar ese mismo nombre de subcarpeta (ej. `proyecto_x`).
-   - ÚNICAMENTE crearás un nuevo nombre de subcarpeta temática si el archivo analizado NO estaba en `media/` o si la petición no incluyó ningún archivo de entrada.
-3. El sistema antepondrá la fecha actual (YYYYMMDD_) al nombre del archivo de forma automática, no lo hagas tú.
+   - ÚNICAMENTE crearás un nuevo nombre de subcarpeta temática (ej. `infografias`) si el archivo analizado NO estaba en `media/` o si la petición no incluyó ningún archivo de entrada.
+4. El sistema antepondrá la fecha actual (YYYYMMDD_) al nombre del archivo de forma automática, no lo hagas tú.
 """
 
 def load_system_prompt(filepath):
@@ -27,21 +26,19 @@ def load_system_prompt(filepath):
     return default_system_prompt
 
 def main():
-    print("=== Terminal Modular Ayni (Escáner de Proyecto Integral) ===")
+    load_dotenv(override=True)
+    print("=== Terminal Modular Ayni (Arquitectura Desacoplada) ===")
     
     os.makedirs("media", exist_ok=True)
-    db = DBManager()
-    if not db.Session:
-        print("\033[91mNo se pudo conectar a la base de datos. Historial será efímero.\033[0m")
     
-    session_id = "SESION_PRUEBA_AYNI_003" 
+    session_id = "SESION_PRUEBA_AYNI_004" 
     current_skill = "AGENTS.md"
     
     print("Escribe 'salir', 'quit' o 'exit' para terminar.\n")
     system_instructions = load_system_prompt(current_skill)
     
     try:
-        manager = GeminiSessionManager(session_id=session_id, db_manager=db, system_prompt=system_instructions)
+        orchestrator = AyniOrchestrator(session_id=session_id, system_prompt=system_instructions)
     except Exception as e:
         print(f"\033[91mError de inicialización:\033[0m {e}")
         sys.exit(1)
@@ -58,25 +55,7 @@ def main():
             if archivos_seleccionados:
                 print(f"\033[96m[Archivos a enviar]: {', '.join([os.path.basename(f) for f in archivos_seleccionados])}\033[0m")
 
-            start_time = time.time()
-            response_text, active_model, provider, in_tokens, out_tokens, error_info, db_parts = manager.send_message_sync(user_input, archivos_seleccionados)
-            elapsed_ms = round((time.time() - start_time) * 1000, 2)
-            
-            interaction_id = db.log_interaction(
-                session_id=session_id,
-                user_input=user_input,
-                response_text=response_text,
-                provider=provider,
-                model_used=active_model,
-                input_tokens=in_tokens,
-                output_tokens=out_tokens,
-                response_time_ms=elapsed_ms,
-                skill_used=current_skill,
-                error_data=error_info
-            )
-            
-            if interaction_id:
-                manager._sync_history_to_db(interaction_id, db_parts, response_text)
+            response_text, active_model, provider, in_tokens, out_tokens, elapsed_ms = orchestrator.process_request(user_input, archivos_seleccionados, current_skill)
             
             if provider == "Ollama":
                  print(f"\033[35m{active_model}: [0m {response_text}\n")

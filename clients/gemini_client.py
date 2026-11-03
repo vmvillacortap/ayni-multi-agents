@@ -1,18 +1,12 @@
 import os
 import json
-import datetime
 import time
 import google.generativeai as genai
-from dotenv import load_dotenv
 from tavily import TavilyClient
-
-from clients.ollama_client import OllamaFallbackManager
-from clients.manus_client import ManusFallbackManager
-from clients.fallback_ui import show_model_selector
-from database.db_manager import DBManager
 from clients.file_manager import guardar_documento, extract_text_from_doc
 
 def obtener_hora_local():
+    import datetime
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def buscar_en_internet(consulta: str):
@@ -29,21 +23,10 @@ def buscar_en_internet(consulta: str):
 
 class GeminiSessionManager:
     def __init__(self, session_id, db_manager, system_prompt="Eres un asistente experto."):
-        load_dotenv(override=True)
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("No se encontró GEMINI_API_KEY en el archivo .env")
-            
-        os.environ["GOOGLE_API_KEY"] = api_key
-        genai.configure(api_key=api_key)
-        
         self.session_id = session_id
         self.db = db_manager
         self.system_prompt = system_prompt
         self.tools = [obtener_hora_local, buscar_en_internet, guardar_documento]
-        
-        self.ollama_fallback = OllamaFallbackManager() 
-        self.manus_fallback = ManusFallbackManager()
         
         self.pools = self._build_dynamic_pools()
         self.history = self.db.load_history(self.session_id)
@@ -103,29 +86,20 @@ class GeminiSessionManager:
         except Exception:
             return {"complexity": "low", "is_complaint": False}
 
-    def _sync_history_to_db(self, interaction_id, new_user_msg, new_model_msg):
-        if not self.db: return
-        self.db.append_to_history(self.session_id, interaction_id, "user", new_user_msg)
-        self.db.append_to_history(self.session_id, interaction_id, "model", [new_model_msg])
-        self.history = self.db.load_history(self.session_id)
-
     def send_message_sync(self, message, attached_files=None):
         error_info = None
         attached_files = attached_files or []
-        
+        db_parts = [message] + [f"[Archivo Adjunto: {f}]" for f in attached_files]
+            
         print("\033[93m[🧠 Enrutador Analizando Complejidad e Intención...]\033[0m", end="\r", flush=True)
         intent = self._analyze_intent(message, attached_files)
         
         target_pool = 'pro' if (intent.get('is_complaint', False) or intent.get('complexity', 'low') == 'high' or attached_files) else 'fast'
         
-        # --- MEJORA: ESCALADO INVERSO ---
-        # Si el enrutador elige PRO, pero la familia PRO está agotada (ej. modelos deprecados o sin cuota), 
-        # delegamos el trabajo a la familia FAST antes de rendirnos y saltar a Ollama/Manus.
         if target_pool == 'pro' and not self.pools['pro']:
             print("\n\033[93m[Ayni] Pool PRO agotado. Redirigiendo petición compleja al Pool FAST (Flash)...\033[0m")
             target_pool = 'fast'
             
-        # Si definitivamente no quedan modelos en el pool objetivo, forzamos la contingencia manual.
         if not self.pools[target_pool]:
             raise Exception("Todos los modelos de Gemini aplicables están agotados o deprecados.")
             
@@ -160,15 +134,12 @@ class GeminiSessionManager:
             if hasattr(response, 'usage_metadata'):
                 in_tokens = response.usage_metadata.prompt_token_count
                 out_tokens = response.usage_metadata.candidates_token_count
-            
-            db_parts = [message] + [f"[Archivo Adjunto: {f}]" for f in attached_files]
                 
             return response.text, self.current_model_name, "Gemini", in_tokens, out_tokens, error_info, db_parts
             
         except Exception as e:
             error_msg = str(e)
             
-            # Comprobación de errores tratables (Cuota o Deprecados)
             is_quota_or_deprecated = any(err in error_msg.lower() for err in ["429", "quota", "404", "not found", "403"])
             
             if is_quota_or_deprecated:
@@ -176,32 +147,9 @@ class GeminiSessionManager:
                 if self.current_model_name in self.pools[target_pool]:
                     self.pools[target_pool].remove(self.current_model_name)
                 
-                # REINTENTO RECURSIVO: Si el pool PRO se vació en la línea anterior, 
-                # la nueva llamada activará el "Escalado Inverso" y pasará al pool FAST.
                 try:
                     return self.send_message_sync(message, attached_files)
                 except Exception as retry_e:
-                    error_msg = str(retry_e)
+                    raise Exception(f"Fallo tras rotación: {str(retry_e)}")
             
-            error_info = {"type": type(e).__name__, "message": error_msg, "fallback": True}
-            print(f"\n\033[93m[Alerta] Falla en la cascada de Gemini ({error_msg}).\033[0m")
-            
-            if self.ollama_fallback.is_available() or self.manus_fallback.is_available():
-                print(f"\033[93m[UI] Abriendo Centro de Contingencia Multi-Agente (Pop-up)...\033[0m")
-                provider, selected_model = show_model_selector(self.ollama_fallback.api_url, self.manus_fallback.get_models())
-                
-                in_tokens = int(len(message.split()) * 1.3)
-                db_parts = [message] + [f"[Archivo Adjunto: {f}]" for f in attached_files]
-                
-                if provider == "Ollama":
-                    resp = self.ollama_fallback.generate_response(message, self.system_prompt, self.history, attached_files)
-                    out_tokens = int(len(resp.split()) * 1.3)
-                    return resp, selected_model, "Ollama", in_tokens, out_tokens, error_info, db_parts
-                elif provider == "Manus":
-                    resp = self.manus_fallback.generate_response(message, self.system_prompt, self.history, selected_model, attached_files)
-                    out_tokens = int(len(resp.split()) * 1.3)
-                    return resp, selected_model, "Manus", in_tokens, out_tokens, error_info, db_parts
-                else:
-                    return "Contingencia cancelada por el usuario.", "Ninguno", "UI", 0, 0, error_info, db_parts
-            else:
-                 return f"Error crítico: API falló y no hay respaldo.", "Ninguno", "Error", 0, 0, error_info, [message]
+            raise Exception(error_msg)
