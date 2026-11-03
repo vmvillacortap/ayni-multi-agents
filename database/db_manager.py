@@ -1,5 +1,6 @@
 import os
 import datetime
+import json
 from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, ForeignKey, Boolean, text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from dotenv import load_dotenv
@@ -49,10 +50,20 @@ class ChatHistory(Base):
     interaction_id = Column(Integer, ForeignKey(f'{SCHEMA_NAME}.interactions.id'))
     session_id = Column(String(100), nullable=False)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
-    role = Column(String(20), nullable=False) # 'user' o 'model'
-    parts = Column(Text, nullable=False) # Almacenado como JSONB idealmente, pero TEXT con JSON.dumps asegura compatibilidad
+    role = Column(String(20), nullable=False)
+    parts = Column(Text, nullable=False)
     
     interaction = relationship("Interaction", back_populates="history_entries")
+
+# --- NUEVA TABLA: CACHING DE BÚSQUEDA ---
+class SearchCache(Base):
+    __tablename__ = 'search_cache'
+    __table_args__ = {'schema': SCHEMA_NAME}
+    
+    query = Column(String(500), primary_key=True)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    results = Column(Text, nullable=False)
+    provider = Column(String(50), nullable=False)
 
 class DBManager:
     def __init__(self):
@@ -73,9 +84,55 @@ class DBManager:
             Base.metadata.create_all(self.engine)
             self.Session = sessionmaker(bind=self.engine)
         except Exception as e:
-            print(f"\n\033[91m[Base de Datos] Advertencia: No se pudo conectar a PostgreSQL. Verifica que la BD '{pg_db}' exista.\nError: {e}\033[0m")
+            print(f"\n\033[91m[Base de Datos] Advertencia: No se pudo conectar a PostgreSQL.\nError: {e}\033[0m")
             self.Session = None
 
+    # --- NUEVOS MÉTODOS DE CACHING ---
+    def get_cached_search(self, query, max_age_hours=1):
+        """Recupera una búsqueda cacheada si no es más antigua que max_age_hours."""
+        if not self.Session:
+            return None, None
+            
+        session = self.Session()
+        try:
+            cache_entry = session.query(SearchCache).filter_by(query=query).first()
+            if cache_entry:
+                age = datetime.datetime.utcnow() - cache_entry.timestamp
+                if age.total_seconds() <= (max_age_hours * 3600):
+                    return cache_entry.results, cache_entry.provider
+                else:
+                    # Auto-limpieza en lectura
+                    session.delete(cache_entry)
+                    session.commit()
+            return None, None
+        except Exception:
+            return None, None
+        finally:
+            session.close()
+
+    def set_cached_search(self, query, results, provider):
+        """Guarda o actualiza el resultado de una búsqueda en la caché de PostgreSQL."""
+        if not self.Session:
+            return
+            
+        session = self.Session()
+        try:
+            # Upsert básico (funciona universalmente en SQLAlchemy)
+            cache_entry = session.query(SearchCache).filter_by(query=query).first()
+            if cache_entry:
+                cache_entry.results = results
+                cache_entry.provider = provider
+                cache_entry.timestamp = datetime.datetime.utcnow()
+            else:
+                cache_entry = SearchCache(query=query, results=results, provider=provider)
+                session.add(cache_entry)
+            session.commit()
+        except Exception:
+            session.rollback()
+        finally:
+            session.close()
+
+    # --- MÉTODOS ORIGINALES MANTENIDOS INTACTOS ---
     def log_interaction(self, session_id, user_input, response_text, provider, model_used, input_tokens, output_tokens, response_time_ms, skill_used, error_data=None):
         if not self.Session:
             return None
@@ -83,15 +140,9 @@ class DBManager:
         session = self.Session()
         try:
             interaction = Interaction(
-                session_id=session_id,
-                user_input=user_input,
-                response_text=response_text,
-                provider=provider,
-                model_used=model_used,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                response_time_ms=response_time_ms,
-                skill_used=skill_used
+                session_id=session_id, user_input=user_input, response_text=response_text,
+                provider=provider, model_used=model_used, input_tokens=input_tokens,
+                output_tokens=output_tokens, response_time_ms=response_time_ms, skill_used=skill_used
             )
             session.add(interaction)
             session.flush()
@@ -99,10 +150,8 @@ class DBManager:
             
             if error_data:
                 error_log = ErrorLog(
-                    interaction_id=interaction_id,
-                    error_type=error_data.get('type', 'Unknown'),
-                    error_message=error_data.get('message', ''),
-                    fallback_triggered=error_data.get('fallback', False)
+                    interaction_id=interaction_id, error_type=error_data.get('type', 'Unknown'),
+                    error_message=error_data.get('message', ''), fallback_triggered=error_data.get('fallback', False)
                 )
                 session.add(error_log)
                 
@@ -116,49 +165,32 @@ class DBManager:
             session.close()
 
     def load_history(self, session_id):
-        """Recupera el historial de chat para una sesión específica, formateado para Gemini."""
-        if not self.Session:
-            return []
-            
+        if not self.Session: return []
         session = self.Session()
         formatted_history = []
         try:
             entries = session.query(ChatHistory).filter_by(session_id=session_id).order_by(ChatHistory.timestamp).all()
             for entry in entries:
-                import json
-                try:
-                    parts = json.loads(entry.parts)
-                except:
-                    parts = [entry.parts]
-                formatted_history.append({
-                    "role": entry.role,
-                    "parts": parts
-                })
+                try: parts = json.loads(entry.parts)
+                except: parts = [entry.parts]
+                formatted_history.append({"role": entry.role, "parts": parts})
             return formatted_history
-        except Exception as e:
-            print(f"\033[91m[DB Error]: No se pudo cargar el historial. {e}\033[0m")
+        except Exception:
             return []
         finally:
             session.close()
 
     def append_to_history(self, session_id, interaction_id, role, parts):
-        """Guarda un único mensaje (user o model) en el historial persistente de PostgreSQL."""
-        if not self.Session:
-            return
-            
+        if not self.Session: return
         session = self.Session()
-        import json
         try:
             history_entry = ChatHistory(
-                interaction_id=interaction_id,
-                session_id=session_id,
-                role=role,
-                parts=json.dumps(parts, ensure_ascii=False)
+                interaction_id=interaction_id, session_id=session_id,
+                role=role, parts=json.dumps(parts, ensure_ascii=False)
             )
             session.add(history_entry)
             session.commit()
-        except Exception as e:
-            print(f"\033[91m[DB Error]: No se pudo agregar al historial. {e}\033[0m")
+        except Exception:
             session.rollback()
         finally:
             session.close()

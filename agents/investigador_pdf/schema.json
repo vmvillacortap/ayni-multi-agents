@@ -1,0 +1,14 @@
+{
+    "name": "investigador_pdf",
+    "version": "1.0.0",
+    "description": "Busca, filtra y descarga documentos PDF de internet sobre temas específicos de investigación.",
+    "author": "Ayni Framework",
+    "capabilities": [
+        "web_search",
+        "file_download"
+    ],
+    "dependencies": [
+        "requests",
+        "tavily-python"
+    ]
+}

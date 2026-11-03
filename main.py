@@ -27,18 +27,21 @@ def load_system_prompt(filepath):
 
 def main():
     load_dotenv(override=True)
-    print("=== Terminal Modular Ayni (Arquitectura Desacoplada) ===")
+    print("=== Terminal Modular Ayni (Supervisor de Agentes) ===")
     
     os.makedirs("media", exist_ok=True)
+    # Crear directorio base de agentes si no existe
+    os.makedirs("agents", exist_ok=True)
     
-    session_id = "SESION_PRUEBA_AYNI_004" 
+    session_id = "SESION_PRUEBA_AYNI_005" 
     current_skill = "AGENTS.md"
     
     print("Escribe 'salir', 'quit' o 'exit' para terminar.\n")
     system_instructions = load_system_prompt(current_skill)
     
     try:
-        orchestrator = AyniOrchestrator(session_id=session_id, system_prompt=system_instructions)
+        # El Orquestador ahora escaneará la carpeta 'agents/' automáticamente al arrancar
+        orchestrator = AyniOrchestrator(session_id=session_id, default_system_prompt=system_instructions)
     except Exception as e:
         print(f"\033[91mError de inicialización:\033[0m {e}")
         sys.exit(1)
@@ -69,7 +72,7 @@ def main():
         except KeyboardInterrupt:
             break
         except Exception as e:
-            print(f"\n\033[91mError de ejecución:\033[0m {str(e)}\n")
+            print(f"\n\033[91mError de ejecución:\033[0m {str(e)}")
 
 if __name__ == "__main__":
     main()
