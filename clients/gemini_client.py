@@ -1,7 +1,8 @@
 import os
 import json
 import time
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from tavily import TavilyClient
 from clients.file_manager import guardar_documento, extract_text_from_doc
 
@@ -28,11 +29,18 @@ class GeminiSessionManager:
         self.system_prompt = system_prompt
         self.tools = [obtener_hora_local, buscar_en_internet, guardar_documento]
         
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("Falta GEMINI_API_KEY en el archivo .env")
+            
+        # Instancia del nuevo SDK google.genai
+        self.client = genai.Client(api_key=api_key)
+        
         self.pools = self._build_dynamic_pools()
         self.history = self.db.load_history(self.session_id)
         
         valid_fast_models = [m for m in self.pools['fast'] if 'tts' not in m]
-        self.current_model_name = valid_fast_models[0] if valid_fast_models else 'models/gemini-1.5-flash-latest'
+        self.current_model_name = valid_fast_models[0] if valid_fast_models else 'gemini-1.5-flash-latest'
         
         self.model = None
         self.chat_session = None
@@ -41,7 +49,8 @@ class GeminiSessionManager:
     def _build_dynamic_pools(self):
         pools = {'router': [], 'fast': [], 'pro': []}
         try:
-            raw_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            # En el nuevo SDK client.models.list() devuelve objetos con atributo name
+            raw_models = [m.name for m in self.client.models.list()]
             chat_models = [m for m in raw_models if 'tts' not in m]
             multimodal_models = [m for m in chat_models if ('1.5' in m or '2.' in m or '3.' in m or 'vision' in m) and 'embedding' not in m and 'aqa' not in m]
             
@@ -54,19 +63,26 @@ class GeminiSessionManager:
             if not pools['router']: pools['router'] = pools['fast']
             return pools
         except Exception as e:
-            return {'router': ['models/gemini-1.5-flash-latest'], 'fast': ['models/gemini-1.5-flash-latest'], 'pro': ['models/gemini-1.5-pro-latest']}
+            return {'router': ['gemini-1.5-flash-latest'], 'fast': ['gemini-1.5-flash-latest'], 'pro': ['gemini-1.5-pro-latest']}
 
     def _switch_active_model(self, model_name):
         if self.current_model_name != model_name or self.chat_session is None:
             self.current_model_name = model_name
-            self.model = genai.GenerativeModel(
-                model_name=self.current_model_name, 
-                system_instruction=self.system_prompt,
-                tools=self.tools
-            )
-            self.chat_session = self.model.start_chat(
-                history=self.history,
-                enable_automatic_function_calling=True
+            
+            # El historial de la DB debe mapearse para evitar problemas con la validación tipada estricta
+            formatted_history = []
+            for msg in self.history:
+                parts = [{"text": p} for p in msg["parts"]]
+                formatted_history.append({"role": msg["role"], "parts": parts})
+            
+            # Inicialización de sesión de chat bajo el nuevo SDK
+            self.chat_session = self.client.chats.create(
+                model=self.current_model_name,
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_prompt,
+                    tools=self.tools
+                ),
+                history=formatted_history
             )
 
     def _analyze_intent(self, prompt, attached_files):
@@ -74,13 +90,17 @@ class GeminiSessionManager:
             return {"complexity": "high", "is_complaint": False}
             
         router_model = self.pools['router'][0]
-        analyzer = genai.GenerativeModel(model_name=router_model)
         
         sys_prompt = """Clasifica la petición. Responde ÚNICAMENTE con un JSON: {"complexity": "low" | "high", "is_complaint": true | false}"""
         try:
-            res = analyzer.generate_content(
-                f"{sys_prompt}\n\nPetición: {prompt}",
-                generation_config=genai.types.GenerationConfig(response_mime_type="application/json", temperature=0.0)
+            # Generación atómica bajo el nuevo SDK (sin inicializar chat)
+            res = self.client.models.generate_content(
+                model=router_model,
+                contents=f"{sys_prompt}\n\nPetición: {prompt}",
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", 
+                    temperature=0.0
+                )
             )
             return json.loads(res.text)
         except Exception:
@@ -119,21 +139,22 @@ class GeminiSessionManager:
                         gemini_parts.append(f"\n--- Contenido de {os.path.basename(file_path)} ---\n{file_content}\n")
                     else:
                         print(f"\033[90mSubiendo {os.path.basename(file_path)} a la API de Gemini...\033[0m", end="\r")
-                        uploaded = genai.upload_file(file_path)
+                        # Nuevo File API Upload
+                        uploaded = self.client.files.upload(file=file_path)
                         gemini_parts.append(uploaded)
                         
                         while uploaded.state.name == "PROCESSING":
                             print("\033[90mProcesando archivo en la nube...\033[0m", end="\r")
                             time.sleep(2)
-                            uploaded = genai.get_file(uploaded.name)
+                            uploaded = self.client.files.get(name=uploaded.name)
                         print(f"\033[90mSubido y procesado: {os.path.basename(file_path)}          \033[0m")
             
-            response = self.chat_session.send_message(gemini_parts, request_options={"timeout": 60})
+            response = self.chat_session.send_message(gemini_parts)
             
             in_tokens, out_tokens = 0, 0
-            if hasattr(response, 'usage_metadata'):
-                in_tokens = response.usage_metadata.prompt_token_count
-                out_tokens = response.usage_metadata.candidates_token_count
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                in_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
+                out_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
                 
             return response.text, self.current_model_name, "Gemini", in_tokens, out_tokens, error_info, db_parts
             

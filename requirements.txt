@@ -1,7 +1,8 @@
-google-generativeai
+google-genai
 python-dotenv
 tavily-python
 requests
 sqlalchemy
 psycopg2-binary
 pymupdf
+python-docx
