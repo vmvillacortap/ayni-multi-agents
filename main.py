@@ -30,7 +30,6 @@ def main():
     print("=== Terminal Modular Ayni (Supervisor de Agentes) ===")
     
     os.makedirs("media", exist_ok=True)
-    # Crear directorio base de agentes si no existe
     os.makedirs("agents", exist_ok=True)
     
     session_id = "SESION_PRUEBA_AYNI_005" 
@@ -40,7 +39,6 @@ def main():
     system_instructions = load_system_prompt(current_skill)
     
     try:
-        # El Orquestador ahora escaneará la carpeta 'agents/' automáticamente al arrancar
         orchestrator = AyniOrchestrator(session_id=session_id, default_system_prompt=system_instructions)
     except Exception as e:
         print(f"\033[91mError de inicialización:\033[0m {e}")
@@ -56,7 +54,8 @@ def main():
 
             archivos_seleccionados = scan_media_and_select(user_input)
             if archivos_seleccionados:
-                print(f"\033[96m[Archivos a enviar]: {', '.join([os.path.basename(f) for f in archivos_seleccionados])}\033[0m")
+                # MODIFICADO: Color celeste oscuro ([36m) para el output informativo de archivos (antes azul oscuro)
+                print(f"\033[36m[Archivos a enviar]: {', '.join([os.path.basename(f) for f in archivos_seleccionados])}\033[0m")
 
             response_text, active_model, provider, in_tokens, out_tokens, elapsed_ms = orchestrator.process_request(user_input, archivos_seleccionados, current_skill)
             
@@ -65,7 +64,8 @@ def main():
             elif provider == "Manus":
                  print(f"\033[36m{active_model}: [0m {response_text}\n")
             else:
-                 print(f"\033[94mGemini ({active_model}): [0m {response_text}\n")
+                 # MODIFICADO: Color cyan brillante ([96m) para respuestas de Gemini (antes azul oscuro 94m)
+                 print(f"\033[96mGemini ({active_model}): [0m {response_text}\n")
             
             print(f"\033[90m[Metricas DB] Motor: {active_model} | Tokens In: {in_tokens} Out: {out_tokens} | Tiempo: {elapsed_ms}ms\033[0m")
             

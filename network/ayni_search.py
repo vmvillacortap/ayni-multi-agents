@@ -39,7 +39,6 @@ class AyniSearchEcosystem:
         res = requests.post("https://api.tavily.com/search", json=payload, headers=headers, timeout=10)
         res.raise_for_status()
         results = res.json().get("results", [])
-        # FIX: Agregamos explícitamente la URL al final del contenido
         return "\n".join([f"- {r['title']}: {r['content']} (URL: {r.get('url', 'N/A')})" for r in results[:3]])
 
     def _search_ddgs(self, query):
@@ -64,16 +63,28 @@ class AyniSearchEcosystem:
 
         for provider_name in self.priority_list:
             if provider_name not in providers: continue
-            print(f"\033[90mInvocando proveedor: {provider_name.upper()}...\033[0m", end="\r")
+            
+            # MODIFICADO: Color verde claro ([92m) solo para TAVILY
+            if provider_name == 'tavily':
+                print(f"\033[92mInvocando proveedor: {provider_name.upper()}...\033[0m", end="\r")
+            else:
+                print(f"\033[90mInvocando proveedor: {provider_name.upper()}...\033[0m", end="\r")
+                
             try:
                 resultado = providers[provider_name](query)
                 if resultado and resultado.strip():
-                    print(f"\033[92m[Equilibrio] El proveedor {provider_name.upper()} completó el trabajo.\033[0m{' ' * 20}")
+                    if provider_name == 'tavily':
+                        print(f"\033[92m[Equilibrio] El proveedor {provider_name.upper()} completó el trabajo.\033[0m{' ' * 20}")
+                    else:
+                        print(f"\033[96m[Equilibrio] El proveedor {provider_name.upper()} completó el trabajo.\033[0m{' ' * 20}")
                     self.db.set_cached_search(query, resultado, provider_name)
                     return resultado
             except Exception as e:
                 err_msg = str(e).split(":")[-1].strip()[:40]
-                print(f"\033[93m[Reciprocidad Ayni] {provider_name.upper()} falló ({err_msg}). Delegando...\033[0m")
+                if provider_name == 'tavily':
+                    print(f"\033[92m[Reciprocidad Ayni] {provider_name.upper()} falló ({err_msg}). Delegando...\033[0m")
+                else:
+                    print(f"\033[93m[Reciprocidad Ayni] {provider_name.upper()} falló ({err_msg}). Delegando...\033[0m")
                 continue
                 
         return "Error crítico: Toda la red de proveedores Ayni ha colapsado."
