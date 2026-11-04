@@ -22,6 +22,7 @@ En la cultura andina, el Ayni es un principio fundacional de colaboración mutua
 ### 6.1. Patrón de Enrutador Semántico (Semantic Router)
 La arquitectura implementa un orquestador inteligente basado en el patrón Router:
 *   **Clasificador (Analyzer):** Al recibir un prompt, un modelo ultraligero analiza el input devolviendo un JSON estricto en milisegundos.
+*   **Supervisor de Agentes:** Evaluará la intención del usuario y la contrastará contra un catálogo de agentes (`schema.json`). Si la solicitud encaja perfectamente (ej. "descargar PDF"), derivará el control y las herramientas (`tools.py`) al especialista.
 *   **Enrutamiento Dinámico y Rotación Robusta:** Si el router escala al `Pool Pro` y el modelo inicial falla (por cuota 429 o porque fue deprecado 404/403), el orquestador iterará automáticamente sobre los demás modelos de la misma familia antes de rendirse.
 
 ### 6.2. Soporte Multimodal y Manejo de Medios (Escáner Global y Pop-up Inteligente)

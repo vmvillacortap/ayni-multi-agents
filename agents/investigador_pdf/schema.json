@@ -1,14 +1,4 @@
 {
-    "name": "investigador_pdf",
-    "version": "1.0.0",
-    "description": "Busca, filtra y descarga documentos PDF de internet sobre temas específicos de investigación.",
-    "author": "Ayni Framework",
-    "capabilities": [
-        "web_search",
-        "file_download"
-    ],
-    "dependencies": [
-        "requests",
-        "tavily-python"
-    ]
+  "name": "investigador_pdf",
+  "description": "Utiliza este agente cuando el usuario solicite explícitamente descargar, buscar, localizar o encontrar archivos PDF en internet sobre cualquier tema."
 }

@@ -108,26 +108,49 @@ class AyniOrchestrator:
         if not self.agents_registry or not self.gemini:
             return None, self.default_system_prompt, []
             
-        # 1. Armar el catálogo de agentes para que el Supervisor elija
-        catalog = "\n".join([f"- '{name}': {data['schema'].get('description', '')}" for name, data in self.agents_registry.items()])
-        prompt_supervisor = f"""Eres el Supervisor de Ayni. Tu tarea es enrutar la petición del usuario al agente correcto, o manejarla tú mismo si es general.
-        Catálogo de Agentes Disponibles:
-        {catalog}
+        # 1. Armar el catálogo de agentes para que el Supervisor elija de forma robusta
+        catalog_items = []
+        for name, data in self.agents_registry.items():
+            desc = data['schema'].get('description', '')
+            catalog_items.append(f"\nAgente: '{name}'\nDescripción: {desc}")
         
-        Responde ÚNICAMENTE con el nombre exacto del agente (ej. 'investigador_pdf'). Si la petición es general o no requiere un agente especializado, responde 'general'."""
+        catalog = "\n".join(catalog_items)
+        
+        prompt_supervisor = f"""Eres el Supervisor Semántico de Ayni. Tu única tarea es clasificar la intención del usuario y derivarla al agente correcto del catálogo.
+        
+        --- CATÁLOGO DE AGENTES DISPONIBLES ---{catalog}
+        
+        --- REGLAS DE ENRUTAMIENTO ---
+        1. Analiza el requerimiento del usuario y compáralo con las descripciones del catálogo.
+        2. Si la petición coincide CLARAMENTE con las funciones de un agente específico (por ejemplo, buscar/descargar PDFs o investigar archivos en internet), DEBES seleccionar ese agente.
+        3. Si la petición es genérica, conversacional, de programación, o no encaja con ningún agente, DEBES seleccionar 'general'.
+        
+        Responde ÚNICAMENTE con un JSON estrictamente formateado de la siguiente manera:
+        {{"agente": "nombre_del_agente_o_general"}}
+        """
         
         try:
-            target_agent = self.gemini._generate_quick_classification(prompt_supervisor, user_input)
-            target_agent = target_agent.strip().lower()
+            # Pedimos la respuesta en JSON para evitar alucinaciones
+            target_agent_json = self.gemini._generate_quick_classification(prompt_supervisor, user_input)
+            
+            import re
+            json_match = re.search(r'\{.*?\}', target_agent_json, re.DOTALL)
+            
+            if json_match:
+                parsed_json = json.loads(json_match.group(0))
+                target_agent = parsed_json.get("agente", "general").strip().lower()
+            else:
+                target_agent = "general"
             
             if target_agent in self.agents_registry:
-                print(f"\033[96m[Supervisor] Derivando tarea al agente: {target_agent}\033[0m")
+                print(f"\033[96m[Supervisor] Intención detectada. Derivando tarea al agente: {target_agent}\033[0m")
                 agent_data = self.agents_registry[target_agent]
                 combined_prompt = f"{self.default_system_prompt}\n\n--- INSTRUCCIONES ESPECÍFICAS DEL AGENTE ({target_agent}) ---\n{agent_data['instructions']}"
                 return target_agent, combined_prompt, agent_data['tools']
                 
             return None, self.default_system_prompt, []
-        except Exception:
+        except Exception as e:
+            print(f"\033[90m[Supervisor Error]: {e} -> Forzando ruta general.\033[0m")
             return None, self.default_system_prompt, []
 
     def process_request(self, message, attached_files, default_skill):
@@ -166,5 +189,4 @@ class AyniOrchestrator:
         if interaction_id:
             self._sync_history(interaction_id, db_parts, response_text)
             
-        # MODIFICACIÓN: Ahora devolvemos explícitamente skill_used para mostrarlo en main.py
         return response_text, active_model, provider, in_tokens, out_tokens, elapsed_ms, skill_used
