@@ -166,4 +166,5 @@ class AyniOrchestrator:
         if interaction_id:
             self._sync_history(interaction_id, db_parts, response_text)
             
-        return response_text, active_model, provider, in_tokens, out_tokens, elapsed_ms
+        # MODIFICACIÓN: Ahora devolvemos explícitamente skill_used para mostrarlo en main.py
+        return response_text, active_model, provider, in_tokens, out_tokens, elapsed_ms, skill_used

@@ -54,18 +54,21 @@ def main():
 
             archivos_seleccionados = scan_media_and_select(user_input)
             if archivos_seleccionados:
-                # MODIFICADO: Color celeste oscuro ([36m) para el output informativo de archivos (antes azul oscuro)
                 print(f"\033[36m[Archivos a enviar]: {', '.join([os.path.basename(f) for f in archivos_seleccionados])}\033[0m")
 
-            response_text, active_model, provider, in_tokens, out_tokens, elapsed_ms = orchestrator.process_request(user_input, archivos_seleccionados, current_skill)
+            # MODIFICACIÓN: Desempaquetamos el 7mo valor (skill_used)
+            response_text, active_model, provider, in_tokens, out_tokens, elapsed_ms, skill_used = orchestrator.process_request(user_input, archivos_seleccionados, current_skill)
+            
+            # Formateamos el tag del agente si se usó uno específico
+            agent_info = f" [Agente: {skill_used}]" if skill_used != current_skill else ""
             
             if provider == "Ollama":
-                 print(f"\033[35m{active_model}: [0m {response_text}\n")
+                 # FIX: Añadido el escape ANSI faltante (\033[0m)
+                 print(f"\033[35m{active_model}{agent_info}: \033[0m {response_text}\n")
             elif provider == "Manus":
-                 print(f"\033[36m{active_model}: [0m {response_text}\n")
+                 print(f"\033[36m{active_model}{agent_info}: \033[0m {response_text}\n")
             else:
-                 # MODIFICADO: Color cyan brillante ([96m) para respuestas de Gemini (antes azul oscuro 94m)
-                 print(f"\033[96mGemini ({active_model}): [0m {response_text}\n")
+                 print(f"\033[96mGemini ({active_model}){agent_info}: \033[0m {response_text}\n")
             
             print(f"\033[90m[Metricas DB] Motor: {active_model} | Tokens In: {in_tokens} Out: {out_tokens} | Tiempo: {elapsed_ms}ms\033[0m")
             
