@@ -33,3 +33,5 @@ La arquitectura implementa un orquestador inteligente basado en el patrón Route
 
 ### 6.3. Telemetría y Base de Datos Relacional (`database/`)
 El rastreo de ejecuciones se encapsula en su propia capa de persistencia en PostgreSQL (`interactions`, `errors`, `chat_history`).
+* **Métricas de Interacción:** Se almacena cada sesión, input/output, modelo usado, tiempos de respuesta (ms) y consumo de tokens.
+* **Métricas de Agentes y Herramientas:** Cada registro guarda qué sub-agente (ej. `investigador_pdf` o `AGENTS.md`) procesó la solicitud y qué herramientas específicas (`tools_used`) le fueron proporcionadas al LLM para responder.

@@ -25,6 +25,8 @@ class Interaction(Base):
     output_tokens = Column(Integer)
     response_time_ms = Column(Float)
     skill_used = Column(String(100))
+    # NUEVA COLUMNA PARA RASTREAR HERRAMIENTAS
+    tools_used = Column(String(255), nullable=True) 
     
     errors = relationship("ErrorLog", back_populates="interaction", cascade="all, delete-orphan")
     history_entries = relationship("ChatHistory", back_populates="interaction", cascade="all, delete-orphan")
@@ -55,7 +57,6 @@ class ChatHistory(Base):
     
     interaction = relationship("Interaction", back_populates="history_entries")
 
-# --- NUEVA TABLA: CACHING DE BÚSQUEDA ---
 class SearchCache(Base):
     __tablename__ = 'search_cache'
     __table_args__ = {'schema': SCHEMA_NAME}
@@ -80,6 +81,14 @@ class DBManager:
             with self.engine.connect() as conn:
                 conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}"))
                 conn.commit()
+            
+            # Ejecuta un alter table por si la columna no existe en BD viejas
+            with self.engine.connect() as conn:
+                try:
+                    conn.execute(text(f"ALTER TABLE {SCHEMA_NAME}.interactions ADD COLUMN IF NOT EXISTS tools_used VARCHAR(255);"))
+                    conn.commit()
+                except:
+                    pass
                 
             Base.metadata.create_all(self.engine)
             self.Session = sessionmaker(bind=self.engine)
@@ -87,12 +96,8 @@ class DBManager:
             print(f"\n\033[91m[Base de Datos] Advertencia: No se pudo conectar a PostgreSQL.\nError: {e}\033[0m")
             self.Session = None
 
-    # --- NUEVOS MÉTODOS DE CACHING ---
     def get_cached_search(self, query, max_age_hours=1):
-        """Recupera una búsqueda cacheada si no es más antigua que max_age_hours."""
-        if not self.Session:
-            return None, None
-            
+        if not self.Session: return None, None
         session = self.Session()
         try:
             cache_entry = session.query(SearchCache).filter_by(query=query).first()
@@ -101,23 +106,16 @@ class DBManager:
                 if age.total_seconds() <= (max_age_hours * 3600):
                     return cache_entry.results, cache_entry.provider
                 else:
-                    # Auto-limpieza en lectura
                     session.delete(cache_entry)
                     session.commit()
             return None, None
-        except Exception:
-            return None, None
-        finally:
-            session.close()
+        except Exception: return None, None
+        finally: session.close()
 
     def set_cached_search(self, query, results, provider):
-        """Guarda o actualiza el resultado de una búsqueda en la caché de PostgreSQL."""
-        if not self.Session:
-            return
-            
+        if not self.Session: return
         session = self.Session()
         try:
-            # Upsert básico (funciona universalmente en SQLAlchemy)
             cache_entry = session.query(SearchCache).filter_by(query=query).first()
             if cache_entry:
                 cache_entry.results = results
@@ -127,22 +125,18 @@ class DBManager:
                 cache_entry = SearchCache(query=query, results=results, provider=provider)
                 session.add(cache_entry)
             session.commit()
-        except Exception:
-            session.rollback()
-        finally:
-            session.close()
+        except Exception: session.rollback()
+        finally: session.close()
 
-    # --- MÉTODOS ORIGINALES MANTENIDOS INTACTOS ---
-    def log_interaction(self, session_id, user_input, response_text, provider, model_used, input_tokens, output_tokens, response_time_ms, skill_used, error_data=None):
-        if not self.Session:
-            return None
-            
+    def log_interaction(self, session_id, user_input, response_text, provider, model_used, input_tokens, output_tokens, response_time_ms, skill_used, error_data=None, tools_used=None):
+        if not self.Session: return None
         session = self.Session()
         try:
             interaction = Interaction(
                 session_id=session_id, user_input=user_input, response_text=response_text,
                 provider=provider, model_used=model_used, input_tokens=input_tokens,
-                output_tokens=output_tokens, response_time_ms=response_time_ms, skill_used=skill_used
+                output_tokens=output_tokens, response_time_ms=response_time_ms, skill_used=skill_used,
+                tools_used=tools_used
             )
             session.add(interaction)
             session.flush()
@@ -175,10 +169,8 @@ class DBManager:
                 except: parts = [entry.parts]
                 formatted_history.append({"role": entry.role, "parts": parts})
             return formatted_history
-        except Exception:
-            return []
-        finally:
-            session.close()
+        except Exception: return []
+        finally: session.close()
 
     def append_to_history(self, session_id, interaction_id, role, parts):
         if not self.Session: return
@@ -190,7 +182,5 @@ class DBManager:
             )
             session.add(history_entry)
             session.commit()
-        except Exception:
-            session.rollback()
-        finally:
-            session.close()
+        except Exception: session.rollback()
+        finally: session.close()
